@@ -71,7 +71,7 @@
 | `ShareExtension/` | 分享扩展（依赖 App Group entitlement） |
 | `iosApp.entitlements` | 主 App 签名能力 |
 
-## 6. CI 现状（`.github/workflows/ios.yml`，364 行）
+## 6. CI 现状（`.github/workflows/ios.yml`，基线 364 行 / 本轮改动后 539 行）
 
 - 唯一 iOS 编译入口，手动 `workflow_dispatch`，`stage` 四档：`klib` / `link` / `ipa` / `simulator`。
 - 各构建步骤 `continue-on-error: true`，由末尾 `Summarize result` 汇总判定成败（`FAILED=1` 时 `exit 1`）。
@@ -85,7 +85,17 @@
 3. 静态库缓存 key 缺工具链维度：`ios-native-${{ runner.os }}-${{ hashFiles(...) }}` 不含 Xcode/SDK/clang 版本（PRD 10.2 点名的核查项）。
 4. `Set version` 步骤引用 `${{ inputs.version }}`，但 `workflow_dispatch.inputs` 未声明该参数，恒为空串后走时间生成（死代码，无害但易误读）。
 
-## 7. 证据边界
+## 7. 仓库规范
+
+**本仓库没有 `AGENTS.md`、`CONTRIBUTING.md` 或根级 `.editorconfig`**（仅 `modules/web/.editorconfig` 一个子模块有自己的配置）。规范以既有代码与提交历史为准，可归纳为三条：
+
+1. **提交信息**：`type(scope): 中文标题` + 中文正文要点列表。实测最近 20 条提交全部使用 `fix` / `feat` / `perf` / `test` 前缀，正文用「- 」列举具体行为变化与理由。
+2. **注释风格**：中文、解释"为什么"而非"是什么"，涉及平台差异时写清对照关系（如"对照 app 端 IntentHelp.openTTSSetting"）、硬约束来源（如"Apple 硬要求：didFinishLaunching 返回前装好 delegate"）与历史教训（如"2026-08-15 教训"）。
+3. **改动纪律**：小步、单一主题；`project.yml` 与 `Info.plist` 双写需同步；`deploymentTarget` 四处一致（见 `ios15-compatibility.md`）。
+
+本轮改动遵循以上三条：提交信息用 `docs(ios):` / `feat(ios):` / `fix(ios):` / `test(ios):` 前缀 + 中文正文；新增注释说明平台依据；每个提交单一主题、可独立回滚。
+
+## 8. 证据边界
 
 - 本轮**没有**克隆完整 git 历史、**没有**执行 `./gradlew`、**没有**运行 `xcodebuild`、**没有**在设备上安装。
 - 因此"原版能否编译/安装/阅读"这一 M0 门槛**尚未取得 B/I/D 证据**，仅有 S 级静态结论。

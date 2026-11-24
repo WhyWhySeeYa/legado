@@ -4,9 +4,11 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [baseline.md](baseline.md) | 实际 commit、工具链版本、模块与源码集结构、CI 现状、证据等级 |
-| [ios-android-capability-matrix.md](ios-android-capability-matrix.md) | iOS 与 Android 的平台能力逐项对照、真实缺口与判定 |
+| [baseline.md](baseline.md) | 实际 commit、工具链版本、模块与源码集结构、仓库规范、CI 现状、证据等级 |
+| [ios-android-capability-matrix.md](ios-android-capability-matrix.md) | 两个平台接口面（Capabilities / Services）的逐项对照、真实缺口与判定 |
 | [ios15-compatibility.md](ios15-compatibility.md) | 最低系统配置、依赖兼容核查、待真机验证项 |
+| [requirements-matrix.md](requirements-matrix.md) | PRD FR-01~FR-19 → iOS 代码落点映射、差异风险、本轮改动归属 |
+| [test-report.md](test-report.md) | 本轮实际执行过的测试与结果（其余全部未执行） |
 
 ## 证据等级约定
 
