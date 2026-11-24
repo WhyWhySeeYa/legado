@@ -42,6 +42,7 @@ const PATHS = {
  * 新增条目必须同时给出理由，并在 Docs/optimization/ios-android-capability-matrix.md 留档。
  */
 const KNOWN_PLATFORM_LIMITS = {
+  // ---- fun 型能力 ----
   applyAppLanguage:
     'iOS 无进程内 locale 重载, AppleLanguages 方案需经系统语言设置, 自实现要改造 Compose Resources 字符串解析',
   applyMonetColorFromWallpaper:
@@ -52,6 +53,25 @@ const KNOWN_PLATFORM_LIMITS = {
     'iOS 无独立 TTS 设置页, 系统语音在「设置→辅助功能→朗读内容」, 无法深链',
   setProcessTextEnabled:
     'iOS 无 PROCESS_TEXT 等价系统集成',
+  // ---- val 型能力开关 ----
+  wakeLockSupported:
+    'Android 由前台 Service 持唤醒锁(WebService/AudioPlayService); iOS 无 Service 模型, 屏幕常亮已由 UIApplication.isIdleTimerDisabled 在阅读/音频路由内直接控制, 无需用户开关',
+  audioEnergyGlowSupported:
+    '辉光需要播放侧 PCM 能量拦截; Android 有 DSP offload 例外通道, iOS 播放器无等价的能量采样接口',
+  cronetSupported:
+    'iOS 网络栈为 URLSession/ktor-darwin, 不需要 Cronet',
+  languageSwitchSupported:
+    '同 applyAppLanguage, iOS 无进程内语言热切换',
+  mediaButtonSupported:
+    'iOS 无 MediaButtonReceiver 等价物; 锁屏/耳机控制需新增 MPRemoteCommandCenter 实现, 属新能力而非补齐既有实现',
+  predictiveBackSupported:
+    'Android 14+ 系统级跟手返回通道, iOS 无对应机制',
+  processTextSupported:
+    'iOS 无 PROCESS_TEXT 系统集成',
+  heapDumpRecordSupported:
+    'iOS 无 JVM 堆转储',
+  monetColorExtractSupported:
+    'iOS 无 Monet 取色框架',
 };
 
 function readOrDie(rel) {
@@ -83,20 +103,28 @@ function collectCommon() {
   const txt = readOrDie(PATHS.common);
   const members = new Set();
   const defaultUnsupported = new Set();
+  const booleanFlags = new Set();
   for (const line of txt.split('\n')) {
     const m = line.match(/^ {4}(?:open |abstract |suspend |inline )*(?:fun|val|var) ([A-Za-z0-9_]+)/);
     if (m) members.add(m[1]);
     const u = line.match(/^ {4}(?:open |suspend )*fun ([A-Za-z0-9_]+)\([^)]*\)\s*=\s*unsupported\(/);
     if (u) defaultUnsupported.add(u[1]);
+    // 布尔能力开关: 平台差异集中在这里, 必须与 fun 型能力同等对待。
+    // 只收默认 false 的项 —— 默认 true 表示"各端都有该能力", Android 的 override 往往是
+    // 按系统版本降级(如 drawBlur 在 API31 以下无效), iOS 用默认 true 不是缺口。
+    const f = line.match(/^ {4}(?:open )?val ([A-Za-z0-9_]+): Boolean get\(\) = (true|false)/);
+    if (f && f[2] === 'false') booleanFlags.add(f[1]);
   }
-  return { members, defaultUnsupported };
+  return { members, defaultUnsupported, booleanFlags };
 }
 
-const { members, defaultUnsupported } = collectCommon();
+const { members, defaultUnsupported, booleanFlags } = collectCommon();
 const androidSet = collectOverrides([PATHS.android]);
 const iosSet = collectOverrides(PATHS.ios);
 
-const gaps = [...defaultUnsupported]
+// 缺口 = 平台差异项中, Android 覆盖了而 iOS 三段链路都没有的
+const gapKeys = new Set([...defaultUnsupported, ...booleanFlags]);
+const gaps = [...gapKeys]
   .filter(k => androidSet.has(k) && !iosSet.has(k))
   .sort();
 

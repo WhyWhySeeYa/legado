@@ -30,23 +30,47 @@ iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner �
 | 指标 | 数值 |
 | --- | --- |
 | `PlatformCapabilities` 接口成员（fun/val/var） | 137 |
-| 其中带 `= unsupported(...)` 默认降级的成员 | 49 |
+| 其中带 `= unsupported(...)` 默认降级的 fun | 49 |
+| 其中默认 `false` 的布尔能力开关 | 13 |
 | Android 侧 override 数 | 107 |
 | iOS 侧 override 数（三段链路合计） | 97 |
+| iOS / Android override 覆盖率 | 90.7% |
+| 真实缺口（Android 有 / iOS 无） | 14 |
 
-即：**iOS 平台能力层覆盖 Android 的约 91%（97/107），缺口 10 项，其中真正"Android 已实现而 iOS 仍走默认降级"的只有 5 项。**
+判定口径：
 
-## 3. 真实缺口（Android 已实现 / iOS 仍 unsupported）——共 5 项
+- **fun 型**：`commonMain` 里默认 `= unsupported(...)` 的成员，Android 覆盖而 iOS 未覆盖 → 缺口。
+- **val 型**：`commonMain` 里默认 `get() = false` 的布尔开关（"默认不具备"），Android 覆盖而 iOS 未覆盖 → 缺口。
+  默认 `true` 的项不计入：Android 的 override 多为按系统版本降级（如 `drawBlurSupported` 在 API 31 以下无效），iOS 用默认 `true` 属于"有该能力"，不是缺口。
+
+## 3. 真实缺口——共 14 项，全部为平台固有限制
+
+### 3.1 fun 型能力（5 项）
 
 | # | 能力 | Android 实现 | iOS 现状 | 判定 |
 | --- | --- | --- | --- | --- |
-| 1 | `applyAppLanguage` | `App.instance.restart()` 重启进程 | 未 override，走 `unsupported("切换语言")` | **平台机制不同**：iOS 无进程内 locale 重载，`AppleLanguages` UserDefaults 方案在 iOS 13+ 需经系统语言设置或 App Store 语言项，自实现需改造 Compose Resources 的字符串解析路径，属独立立项 |
-| 2 | `applyMonetColorFromWallpaper` | Android 12+ Monet 取色 | 未 override | **平台不存在**：iOS 无 Monet 动态取色框架；自实现需读取壁纸并提取主色，涉及相册权限与主题体系改造 |
+| 1 | `applyAppLanguage` | `App.instance.restart()` 重启进程 | 未 override，走 `unsupported("切换语言")` | **平台机制不同**：iOS 无进程内 locale 重载，`AppleLanguages` UserDefaults 方案在 iOS 13+ 需经系统语言设置或 App Store 语言项，自实现需改造 Compose Resources 的字符串解析路径 |
+| 2 | `applyMonetColorFromWallpaper` | Android 12+ Monet 取色 | 未 override | **平台不存在**：iOS 无 Monet 动态取色框架 |
 | 3 | `createHeapDump` | `Debug.dumpHprofData` | 未 override | **平台不存在**：iOS 无 JVM 堆概念；`NativePlatformCapabilities` 已显式声明 `createHeapDumpSupported = false` 隐藏入口 |
 | 4 | `openTtsSettings` | `IntentHelp.openTTSSetting()` 跳系统 TTS 设置页 | 未 override | **平台不存在**：iOS 无独立 TTS 设置页；系统语音在「设置 → 辅助功能 → 朗读内容」，无法深链。App 内 TTS 引擎已由 `showHttpTtsEditDialog` 覆盖 |
 | 5 | `setProcessTextEnabled` | Android `PROCESS_TEXT` 组件启停 | 未 override | **平台不存在**：iOS 无 `PROCESS_TEXT` 等价系统集成 |
 
-**结论：5 项缺口全部为平台固有限制，不存在"照抄 Android 即可补齐"的遗漏项。**
+### 3.2 val 型能力开关（9 项）
+
+| # | 开关 | Android 依据 | iOS 现状 | 判定 |
+| --- | --- | --- | --- | --- |
+| 6 | `wakeLockSupported` | 前台 Service（WebService / AudioPlayService）真持唤醒锁 | 未 override | **语义不同**：iOS 无 Service 模型；屏幕常亮已由 `UIApplication.isIdleTimerDisabled` 在阅读/音频路由内直接控制（`IosPlatformServices.kt` `IosWindowController.setKeepScreenOn`），不需要用户开关 |
+| 7 | `audioEnergyGlowSupported` | 播放侧 PCM 能量拦截（DSP offload 例外通道） | 未 override | **无等价接口**：iOS 播放器无对应的能量采样通道 |
+| 8 | `cronetSupported` | 注册了 CronetProvider | 未 override | **不需要**：iOS 网络栈为 URLSession / ktor-darwin |
+| 9 | `languageSwitchSupported` | `AppContextWrapper.wrap` + 重启 | 未 override | **平台机制不同**，同 `applyAppLanguage` |
+| 10 | `mediaButtonSupported` | `MediaButtonReceiver` 读媒体按键 pref | 未 override | **属新能力**：iOS 锁屏/耳机控制需新增 `MPRemoteCommandCenter` 实现，不是补齐既有实现 |
+| 11 | `predictiveBackSupported` | Android 14+ 系统级跟手返回通道 | 未 override | **平台专属** |
+| 12 | `processTextSupported` | `PROCESS_TEXT` 组件 | 未 override | **平台不存在** |
+| 13 | `heapDumpRecordSupported` | `CrashHandler` 在 OOM 时 dump | 未 override | **平台不存在**：iOS 无 JVM 堆转储 |
+| 14 | `monetColorExtractSupported` | Android 12+ 取色 | 未 override | **平台不存在**：iOS 无 Monet |
+
+**结论：14 项缺口全部为平台固有限制或"属新能力"，不存在"照抄 Android 即可补齐"的遗漏项。**
+其中唯一在技术上可另行立项的是 `mediaButtonSupported`（锁屏/耳机控制），但它是**新增功能**，需真机验证，不属于"补齐既有实现"。
 
 ## 4. iOS 独有实现（Android 侧走默认或另有实现）——共 12 项
 
