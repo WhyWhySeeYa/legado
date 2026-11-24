@@ -94,6 +94,12 @@ jobs:
           echo "===== konan ====="
           ls -la ~/.konan 2>/dev/null || echo "(no ~/.konan yet)"
           grep -n "kotlin *=" gradle/libs.versions.toml || true
+          # 工具链版本落进 step outputs: 静态库缓存 key 必须含 Xcode/SDK 维度, 否则
+          # macos-latest 换代后仍命中旧 .a (PRD 10.2 点名的核查项)。
+          XCODE_VER="$(xcodebuild -version 2>/dev/null | head -1 | tr ' ' '-' | tr -d '"')"
+          SDK_VER="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null | tr -d '"')"
+          echo "xcode=${XCODE_VER:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "sdk=${SDK_VER:-unknown}" >> "$GITHUB_OUTPUT"
 
       # Kotlin/Native 工具链 (~1GB) 缓存, 省掉每轮重新下载
       - name: Cache Kotlin/Native toolchain
@@ -110,7 +116,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: data/build/iosNativeLibs
-          key: ios-native-${{ runner.os }}-${{ hashFiles('modules/quickjs/src/main/cinterop/quickjs-ng/**', 'scripts/build-ios-native.sh') }}
+          # key 必须含工具链维度: 静态库由 Xcode 的 clang 与 SDK 编译, 只 hash 源码会让
+          # macos-latest 换代后继续复用旧架构/旧 SDK 的 .a, 表现为链接期符号或版本不匹配。
+          key: ios-native-${{ runner.os }}-xcode${{ steps.diag.outputs.xcode }}-sdk${{ steps.diag.outputs.sdk }}-${{ hashFiles('modules/quickjs/src/main/cinterop/quickjs-ng/**', 'scripts/build-ios-native.sh') }}
 
       - name: Build iOS native static libs (quickjs-ng)
         id: native
@@ -303,6 +311,145 @@ jobs:
           # IPA 是 stage=ipa 的发布契约；缺失或上传失败必须让工作流失败。
           if-no-files-found: error
 
+      # ===== 产物结构校验: 把"配置声明的最低系统"与"实际产物"对上 (PRD 9.2 AT18 / 10.4) =====
+      # 只做可机器判定的项: 最低系统 / 架构 / 内嵌 framework / 版本号一致性 / 扩展嵌入。
+      # 签名有效性与真机安装不在本步骤范围 —— 未签名 IPA 由侧载工具重签, 无法在此证明可安装。
+      - name: Verify IPA structure
+        id: ipacheck
+        if: inputs.stage == 'ipa'
+        continue-on-error: true
+        working-directory: iosApp/
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-logs"
+          exec > >(tee -a "$GITHUB_WORKSPACE/ci-logs/80-verify-ipa.log") 2>&1
+          set -x
+          IPA="$(ls build/ipa/*.ipa 2>/dev/null | head -1)"
+          test -n "$IPA"
+          rm -rf build/verify && mkdir -p build/verify
+          unzip -q "$IPA" -d build/verify
+          APP="$(find build/verify/Payload -maxdepth 1 -name '*.app' | head -1)"
+          test -n "$APP"
+          PLIST="$APP/Info.plist"
+          test -f "$PLIST"
+
+          MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST" 2>/dev/null || true)"
+          SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST" 2>/dev/null || true)"
+          BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" 2>/dev/null || true)"
+          EXEC_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PLIST" 2>/dev/null || true)"
+          echo "MinimumOSVersion=$MIN_OS"
+          echo "CFBundleShortVersionString=$SHORT_VER"
+          echo "CFBundleIdentifier=$BUNDLE_ID"
+
+          FAILED=0
+          check() { if [ "$2" = "1" ]; then echo "OK   - $1"; else echo "FAIL - $1"; FAILED=1; fi; }
+
+          # 1) 最低系统必须存在且不高于目标 iOS15 (PRD FR-02: 不得静默抬高到 16+)
+          if [ -n "$MIN_OS" ]; then
+            check "MinimumOSVersion 存在 ($MIN_OS)" 1
+            MAJOR="${MIN_OS%%.*}"
+            if [ "$MAJOR" -le 15 ] 2>/dev/null; then
+              check "MinimumOSVersion <= 15 ($MIN_OS)" 1
+            else
+              check "MinimumOSVersion <= 15 (实际 $MIN_OS, 已超出 iOS15 目标)" 0
+            fi
+          else
+            check "MinimumOSVersion 存在" 0
+          fi
+
+          # 2) 主二进制与架构
+          BIN="$APP/${EXEC_NAME:-legado}"
+          if [ -f "$BIN" ]; then
+            check "主二进制存在 ($(basename "$BIN"))" 1
+            ARCHS="$(lipo -archs "$BIN" 2>/dev/null || true)"
+            echo "archs=$ARCHS"
+            case "$ARCHS" in
+              *arm64*) check "主二进制含 arm64" 1 ;;
+              *) check "主二进制含 arm64 (实际: $ARCHS)" 0 ;;
+            esac
+          else
+            check "主二进制存在 ($BIN)" 0
+          fi
+
+          # 3) Kotlin shared framework 必须真的打进 Payload (否则运行期 dyld 直接崩)
+          if [ -d "$APP/Frameworks" ]; then
+            ls -1 "$APP/Frameworks" | sed 's/^/  framework: /'
+            if [ -d "$APP/Frameworks/shared.framework" ]; then
+              check "内嵌 shared.framework" 1
+            else
+              check "内嵌 shared.framework" 0
+            fi
+          else
+            check "Frameworks 目录存在" 0
+          fi
+
+          # 4) 版本号与 IPA 文件名一致 (syncIosVersion 双写 + CI 文件名同源)
+          IPA_NAME="$(basename "$IPA")"
+          case "$IPA_NAME" in
+            *"$SHORT_VER"*) check "IPA 文件名版本与 Info.plist 一致 ($IPA_NAME)" 1 ;;
+            *) check "IPA 文件名版本与 Info.plist 一致 (文件名 $IPA_NAME, plist $SHORT_VER)" 0 ;;
+          esac
+
+          # 5) 分享扩展随包嵌入 (未签名下 entitlement 取不到, 但二进制必须在)
+          if [ -d "$APP/PlugIns/ShareExtension.appex" ]; then
+            check "ShareExtension 已嵌入" 1
+          else
+            check "ShareExtension 已嵌入" 0
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::IPA 结构校验失败, 详见 ios-build-logs 的 80-verify-ipa.log"
+            exit 1
+          fi
+
+      # ===== 构建元信息: 记录真实工具链与产物事实 (PRD 10.4 build-info) =====
+      # 不参与成败判定 (continue-on-error): 元信息缺失要可见, 但不应把一次成功构建判成失败。
+      - name: Emit build-info
+        id: buildinfo
+        if: inputs.stage == 'ipa' || inputs.stage == 'simulator'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-logs"
+          cd "$GITHUB_WORKSPACE"
+          KT="$(sed -n 's/^kotlin *= *"\([^"]*\)".*/\1/p' gradle/libs.versions.toml | head -1)"
+          CMP="$(sed -n 's/^cmp *= *"\([^"]*\)".*/\1/p' gradle/libs.versions.toml | head -1)"
+          GRADLE_VER="$(sed -n 's/.*gradle-\([0-9.]*\)-bin\.zip.*/\1/p' gradle/wrapper/gradle-wrapper.properties | head -1)"
+          XCODE="$(xcodebuild -version 2>/dev/null | head -1 | tr -d '"')"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null | tr -d '"')"
+          JAVA_V="$(java -version 2>&1 | head -1 | tr -d '"')"
+          VER="${{ steps.ver.outputs.version }}"
+          STAGE="${{ inputs.stage }}"
+          if [ "$STAGE" = "ipa" ]; then
+            PRODUCT="legado-${VER}-ios-unsigned.ipa"
+          else
+            PRODUCT="legado-${VER}-ios-simulator.zip"
+          fi
+          OUT="$GITHUB_WORKSPACE/ci-logs/build-info.json"
+          {
+            printf '{\n'
+            printf '  "repository": "%s",\n' "$GITHUB_REPOSITORY"
+            printf '  "commit": "%s",\n' "$GITHUB_SHA"
+            printf '  "ref": "%s",\n' "$GITHUB_REF_NAME"
+            printf '  "run_id": "%s",\n' "$GITHUB_RUN_ID"
+            printf '  "run_attempt": "%s",\n' "$GITHUB_RUN_ATTEMPT"
+            printf '  "stage": "%s",\n' "$STAGE"
+            printf '  "version": "%s",\n' "$VER"
+            printf '  "build_time_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf '  "xcode": "%s",\n' "$XCODE"
+            printf '  "iphoneos_sdk": "%s",\n' "$SDK"
+            printf '  "java": "%s",\n' "$JAVA_V"
+            printf '  "kotlin": "%s",\n' "$KT"
+            printf '  "compose_multiplatform": "%s",\n' "$CMP"
+            printf '  "gradle": "%s",\n' "$GRADLE_VER"
+            printf '  "deployment_target_configured": "14.0",\n'
+            printf '  "architectures": "arm64",\n'
+            printf '  "signing": "unsigned (CODE_SIGNING_ALLOWED=NO)",\n'
+            printf '  "artifact": "%s"\n' "$PRODUCT"
+            printf '}\n'
+          } > "$OUT"
+          cat "$OUT"
+
       # 失败时最需要日志, 故 always()
       - name: Collect logs
         if: always()
@@ -340,6 +487,10 @@ jobs:
           report "link framework" "${{ steps.link.outcome || 'skipped' }}"
           report "xcodebuild archive" "${{ steps.archive.outcome || 'skipped' }}"
           report "package ipa" "${{ steps.ipa.outcome || 'skipped' }}"
+          report "verify ipa structure" "${{ steps.ipacheck.outcome || 'skipped' }}"
+          # build-info 只记录不判失败: 元信息缺失要可见, 但不应把一次成功构建判成失败
+          echo "- build-info: ${{ steps.buildinfo.outcome || 'skipped' }}"
+          echo "- build-info: ${{ steps.buildinfo.outcome || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
           report "simulator build" "${{ steps.simbuild.outcome || 'skipped' }}"
           report "package simulator" "${{ steps.simzip.outcome || 'skipped' }}"
           if [ "$FAILED" = "1" ]; then

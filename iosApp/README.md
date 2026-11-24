@@ -36,7 +36,7 @@ Kotlin 侧改动不属本工程 (见各条说明):
 
 | 能力 | 宿主侧已做的事 | Kotlin 侧还需什么 |
 | --- | --- | --- |
-| 通知点击跳转 | `AppDelegate` 兼 `UNUserNotificationCenterDelegate`, `didReceive` 认 `legadoRoute`/`route`/`uri` 三种 userInfo 键并交 `handleIosLaunchRequest(uri:)` | **冲突待拍板**: Kotlin `IosNotificationPublisher.installDelegate()` 写的是同一个 `UNUserNotificationCenter.delegate` 槽位且后执行, 当前生效的是 Kotlin 那份; 要留宿主侧这份需删掉 Kotlin 的 `installDelegate()` 调用 (理由见 `iOSApp.swift` 注释) |
+| 通知点击跳转 | `AppDelegate` **不**实现 `UNUserNotificationCenterDelegate`; 在 `didFinishLaunching` 内调用 `IosPlatformServicesKt.installIosNotificationDelegate()`, 把 Kotlin 的 delegate 提前装上 | **已解决 (2026-11 核对)**: delegate 唯一所有者为 Kotlin 侧 `IosNotificationDelegate`, `didReceive` 认 `legadoRoute`/`route`/`uri` 三种 userInfo 键并交 `handleIosLaunchRequest(uri:)`; `MainViewController()` 里同槽位那次赋值是保底, 无副作用 (见 `iOSApp.swift:249` 与 `MainViewController.kt:87` 注释)。原"冲突待拍板"描述已过时 |
 | 主屏快捷项 | `Info.plist` 静态三项 (bookshelf/lastRead/readAloud) + `LegadoSceneDelegate` 接住 | readAloud 类型上到宿主后的落地动作 |
 | iCloud | `NSUbiquitousContainers` (容器 `iCloud.io.legado.app.ios`) | `IosICloud.enable()` 注册调用 + entitlements/付费账号 |
 | 本地网络 | `NSLocalNetworkUsageDescription` | 无 |
