@@ -69,6 +69,13 @@ jobs:
         id: parity
         run: node scripts/ios-capability-matrix.mjs --check
 
+      # 守卫脚本自身的自测: 解析口径/白名单/判定自洽性。
+      # 不用 node --test —— iOS 沙盒的 node 不支持该选项, 而本仓库的 iOS 维护场景
+      # 要在手机上也能跑一次; 脚本自带断言, 退出码 0/1。
+      - name: Test parity guard
+        id: paritytest
+        run: node scripts/ios-capability-matrix.test.mjs
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:

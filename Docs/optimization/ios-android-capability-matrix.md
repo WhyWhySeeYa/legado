@@ -9,10 +9,15 @@
 ```bash
 node scripts/ios-capability-matrix.mjs            # 打印 Markdown 矩阵
 node scripts/ios-capability-matrix.mjs --check    # 回归判定, 有未登记缺口则退出码 1
+node scripts/ios-capability-matrix.test.mjs       # 守卫脚本自测(自带断言, 退出码 0/1)
 ```
 
-`--check` 已接入 `.github/workflows/ios.yml` 的 `Check iOS capability parity` 步骤，位于构建最前；
-iOS 相对 Android 的完整性缺口一旦扩大，构建会在烧 macOS runner 之前直接失败。
+两个 `--check` 与自测都已接入 `.github/workflows/ios.yml`，位于构建最前
+（`Check iOS capability parity` / `Test parity guard`）；iOS 相对 Android 的完整性缺口一旦扩大，
+构建会在烧 macOS runner 之前直接失败。
+
+自测不用 `node --test`：iOS 沙盒的 node 不支持该选项，而本仓库的 iOS 维护场景要在手机上也能跑一次，
+所以脚本自带极简断言。
 
 脚本覆盖**两个平台接口面**：
 
