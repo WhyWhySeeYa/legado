@@ -21,6 +21,11 @@ on:
           - link
           - ipa
           - simulator
+      publish:
+        description: '是否把产物发布到 multiplatform-test Release。关闭时只出 Actions artifact, 不动任何公开 Release (含不删除重建既有 tag)'
+        required: false
+        default: true
+        type: boolean
 
 # 组名不能用 github.workflow: 本文件已无 workflow_call (不被其它工作流调用), 但这个 token
 # 在手动触发时就是本工作流名, 与下面拆 stage 的组名不是一路; 保留按 ref+stage 拆分的显式
@@ -48,11 +53,21 @@ jobs:
       - name: Set version
         id: ver
         # 手动触发无版本号入参, 恒按当前时间生成 (test.yml/release.yml 那套上游版本号不再传入)
+        # 注: inputs.version 未在 workflow_dispatch.inputs 声明, 恒为空串, 这里保留读取只是
+        # 为将来补声明时不必再改本步; 不要据此认为 CI 支持传版本号。
         run: |
           v="${{ inputs.version }}"
           [ -n "$v" ] || v="$(TZ=Asia/Shanghai date +3.%y.%m%d%H%M)"
           echo "version=$v" >> $GITHUB_OUTPUT
 
+      # ===== iOS 能力完整性守卫 =====
+      # 纯 node 读源码做符号比对, 秒级完成、不联网、不占构建时间。
+      # 放在最前: iOS 相对 Android 的能力缺口一旦扩大就没必要再烧 macOS runner。
+      # 判定口径与白名单见 scripts/ios-capability-matrix.mjs 与
+      # Docs/optimization/ios-android-capability-matrix.md。
+      - name: Check iOS capability parity
+        id: parity
+        run: node scripts/ios-capability-matrix.mjs --check
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -503,7 +518,9 @@ jobs:
   # klib/link 是调试档无产物, 不发布。
   publish-multiplatform-test:
     needs: ios
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.stage == 'ipa' || inputs.stage == 'simulator') }}
+    # inputs.publish=false 时只出 artifact: 不碰 multiplatform-test 的 tag 与既有资产
+    # (真机 ipa 那条会删除重建 Release, 见 _publish.yml; PRD 10.3 要求不经用户要求不改公开 Release)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && (inputs.stage == 'ipa' || inputs.stage == 'simulator') }}
     permissions:
       contents: write
     uses: ./.github/workflows/_publish.yml

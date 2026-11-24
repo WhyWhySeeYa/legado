@@ -2,6 +2,20 @@
 
 > 证据等级：**S（静态检查）**。数据由脚本对源码做符号级比对得出，未执行构建，未在设备验证。
 
+## 0. 复跑方式
+
+本文数字可用脚本随时复核，不要手工维护：
+
+```bash
+node scripts/ios-capability-matrix.mjs            # 打印 Markdown 矩阵
+node scripts/ios-capability-matrix.mjs --check    # 回归判定, 有未登记缺口则退出码 1
+```
+
+`--check` 已接入 `.github/workflows/ios.yml` 的 `Check iOS capability parity` 步骤，位于构建最前；
+iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner 之前直接失败。
+
+白名单（`KNOWN_PLATFORM_LIMITS`）里的每一项都必须在本文第 3 节有对应的平台限制理由。
+
 ## 1. 比对方法
 
 以 `ui/src/commonMain/kotlin/io/legado/app/ui/root/PlatformCapabilities.kt` 的接口成员为全集，比对三个实现文件的 `override` 集合：
