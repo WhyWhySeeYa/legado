@@ -12,11 +12,20 @@ node scripts/ios-capability-matrix.mjs --check    # 回归判定, 有未登记�
 ```
 
 `--check` 已接入 `.github/workflows/ios.yml` 的 `Check iOS capability parity` 步骤，位于构建最前；
-iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner 之前直接失败。
+iOS 相对 Android 的完整性缺口一旦扩大，构建会在烧 macOS runner 之前直接失败。
 
-白名单（`KNOWN_PLATFORM_LIMITS`）里的每一项都必须在本文第 3 节有对应的平台限制理由。
+脚本覆盖**两个平台接口面**：
+
+- `PlatformCapabilities`（能力开关与入口）→ 白名单 `KNOWN_CAPABILITY_LIMITS`，对应本文第 3 节；
+- `PlatformServices`（文件/分享/窗口/媒体/通知/权限等服务）→ 白名单 `KNOWN_SERVICE_DEFAULTS`，对应本文第 4 节。
+
+两份白名单里的每一项都必须在本文有对应的判定理由，否则 `--check` 失败。
 
 ## 1. 比对方法
+
+脚本按两个接口面分别做符号级比对。
+
+**接口面一：`PlatformCapabilities`**（第 3 节）
 
 以 `ui/src/commonMain/kotlin/io/legado/app/ui/root/PlatformCapabilities.kt` 的接口成员为全集，比对三个实现文件的 `override` 集合：
 
@@ -24,6 +33,15 @@ iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner �
 | --- | --- |
 | Android | `app/src/main/java/io/legado/app/ui/main/AndroidPlatformCapabilities.kt` |
 | iOS | `ui/src/iosMain/.../IosPlatformCapabilities.kt` + `ui/src/iosAndOhosUiMain/.../NativePlatformCapabilities.kt` + `ui/src/sharedUiMain/.../SharedPlatformCapabilities.kt` |
+
+**接口面二：`PlatformServices`**（第 4 节）
+
+以 `ui/src/commonMain/kotlin/io/legado/app/ui/root/PlatformServices.kt` 里**带默认实现**的接口成员为全集（不带默认实现的成员两端必须实现，否则编译失败，不可能缺失），比对：
+
+| 实现链路 | 文件 |
+| --- | --- |
+| Android | `app/src/main/java/io/legado/app/ui/main/AndroidPlatformServices.kt` |
+| iOS | `ui/src/iosMain/kotlin/io/legado/app/ui/IosPlatformServices.kt` |
 
 ## 2. 总量结论
 
@@ -72,13 +90,55 @@ iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner �
 **结论：14 项缺口全部为平台固有限制或"属新能力"，不存在"照抄 Android 即可补齐"的遗漏项。**
 其中唯一在技术上可另行立项的是 `mediaButtonSupported`（锁屏/耳机控制），但它是**新增功能**，需真机验证，不属于"补齐既有实现"。
 
-## 4. iOS 独有实现（Android 侧走默认或另有实现）——共 12 项
+## 4. PlatformServices 默认实现对照（静默降级面）
+
+`ui/src/commonMain/.../PlatformServices.kt` 的子接口里有一批**带默认实现**的成员：不 override 不会编译报错，只会静默走默认值。这是比能力开关更隐蔽的完整性缺口面，脚本单列一节检出。
+
+脚本检出 10 个默认实现成员，其中 Android 覆盖而 iOS 未覆盖的 5 项：
+
+| 成员 | 所属接口 | 判定 |
+| --- | --- | --- |
+| `discardPickedFile` | `FilePickerService` | **原为真实缺陷，本轮已修复**（见 4.1） |
+| `writeImageToDir` | `FilePickerService` | 接口设计如此：仅 `supportsDirWrite=true` 的端走该路径，iOS 的 `supportsDirWrite` 为默认 `false`，分支不可达 |
+| `checkWrite` | `FilePickerService` | 默认视为可写：iOS 沙盒内写入无需预检，备份前恒 `true`；真正写失败由写入侧如实返回 |
+| `importBackgroundImage` | `FilePickerService` | 接口自带共享默认实现（`ScreenInfoProviders` + `bakeCoverImageFile`），iOS 不覆盖即可正常工作 |
+| `processWelcomeImage` | `FilePickerService` | **待办**：见 4.3 |
+
+### 4.1 已修复：`discardPickedFile` 临时副本泄漏
+
+**现象（S 级证据）**
+
+- `IosFilePickerService.pickFiles` 用 `UIDocumentPickerModeImport`：系统把选中文件**复制**进沙盒临时目录后回传路径（`IosPlatformServices.kt` 注释原文）。
+- `IosPlatformCapabilities.importPickedBookFiles` 的 `onRelease` 明确调用 `files.discardPickedFile(it.ref)`，注释写"无论成功/取消/失败都只清本次交付的临时副本"。
+- 但 `IosFilePickerService` **从未 override `discardPickedFile`**，走接口默认 `= Unit`（no-op）。
+
+**影响**：每次经"选文件导入"添加书籍，临时目录都留一份原文件副本；书籍动辄数 MB，占用随导入次数累积。协程取消路径（`pickDocuments` 的 `resume` 取消回调）已有清理，只有**正常完成**路径泄漏。
+
+**修复**：在 `IosFilePickerService` 实现 `discardPickedFile`——只删本应用临时目录（`NSTemporaryDirectory()`）内的路径，含 `..` 的路径直接放弃，不做任何越界删除，符合接口"只允许删自己物化的临时文件"的约定。
+
+**证据等级**：S（静态）。未编译、未真机验证；修复后 `--check` 不再报该项。
+
+### 4.2 其余项判定依据
+
+- `writeImageToDir` / `checkWrite` / `importBackgroundImage`：默认值即该端的正确语义，见上表。
+- `reapplyPageSystemBarAppearance`：默认空实现是给"无需重应用"的端用的。iOS 状态栏外观经 `NSNotificationCenter` 桥到 SwiftUI 根视图**即时生效**（`IosWindowController.setSystemBars`），不存在 Android 那种需要重应用窗口标志的时机；唯一调用点 `BaseComposeActivity` 也是 Android 专用类。
+
+### 4.3 待办：`processWelcomeImage`（启动闪屏背景图）
+
+iOS 未实现"原图复制进图集目录 + 按本端启动界面尺寸烘焙"。现状是调用方回落原路径，**功能可用**，但有两个后果：
+
+1. 启动图**不进备份 zip**（原图未入图集目录）；
+2. 启动时直接解码原图，而非按屏幕尺寸烘焙的小图。
+
+属性能与备份完整性问题，不是功能缺失。实现需要对齐 `importBackgroundImage` 的烘焙链路（`bakeCoverImageFile` + 启动界面尺寸），建议在有 macOS 构建环境、能实测启动耗时时再做，避免无测量依据的改动。
+
+## 5. iOS 独有实现（Android 侧走默认或另有实现）——共 12 项
 
 `addBookSource`、`showBookSourceVariableDialog`、`showBookshelfLayoutDialog`、`showBottomNavConfigDialog`、`showCrashLogs`、`showDefaultCoverGallery`、`showDirectLinkUploadConfigDialog`、`showThemeListDialog`、`startCheckBookSource`、`toggleCustomExport`、`toggleExportUseReplace`、`toggleExportWebDav`
 
 这些在 iOS 侧有具体实现（多数下沉到 `sharedUiMain` 的 `SharedPlatformCapabilities`），说明两端实现路径已经分叉到"各自最合适"的形态，而非简单镜像。
 
-## 5. 平台适配文件对照（`ui/src/androidMain` 36 项 ↔ iOS 侧）
+## 6. 平台适配文件对照（`ui/src/androidMain` 36 项 ↔ iOS 侧）
 
 | Android 文件 | iOS 对应 | 状态 |
 | --- | --- | --- |
@@ -121,7 +181,7 @@ iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner �
 
 **35/36 有对应实现，唯一无对应的是 Android 漫画扩展文本编辑器（依赖 iOS 不存在的 APK 扩展加载）。**
 
-## 6. 平台固有差异（不可对齐，非缺陷）
+## 7. 平台固有差异（不可对齐，非缺陷）
 
 以下差异源于操作系统模型，不属"iOS 未做"，PRD 也不应作为对齐目标：
 
@@ -136,7 +196,7 @@ iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner �
 | 构建类型感知 | `BuildConfig.DEBUG` | 无，`isDebug` 恒 false |
 | webp 编码 | 支持 | 不支持（仅 png/jpg） |
 
-## 7. 已修复的上游线索（PRD FR-14 通知 delegate）
+## 8. 已修复的上游线索（PRD FR-14 通知 delegate）
 
 `iosApp/README.md` 曾记录"Swift 与 Kotlin 侧通知 delegate 覆盖冲突，待拍板"。**代码现状已解决**：
 
@@ -146,7 +206,7 @@ iOS 相对 Android 的能力缺口一旦扩大，构建会在烧 macOS runner �
 
 即 delegate 唯一所有者为 Kotlin 侧。**遗留问题只是 `iosApp/README.md` 的说明文字过时**，本轮已同步修正。
 
-## 8. 后续可推进项（非本轮范围，按 PRD 优先级）
+## 9. 后续可推进项（非本轮范围，按 PRD 优先级）
 
 | 项 | 优先级 | 说明 |
 | --- | --- | --- |

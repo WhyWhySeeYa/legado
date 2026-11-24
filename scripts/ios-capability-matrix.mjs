@@ -1,23 +1,22 @@
 #!/usr/bin/env node
 /**
- * iOS 平台能力完整性守卫。
+ * iOS 平台完整性守卫。
  *
  * 目的：让"iOS 相对 Android 少实现了哪些平台能力"成为可复跑、可进 CI 的机器判定，
  * 而不是靠人肉对比两份上千行的实现文件。iOS 完整性一旦在后续开发中静默退化
  * （新增 Android 能力但忘了 iOS），本脚本会直接报出来。
+ *
+ * 覆盖两个平台接口面：
+ *   1. PlatformCapabilities —— 能力开关与入口（fun + 布尔 val）
+ *   2. PlatformServices    —— 平台服务（文件/分享/窗口/媒体/通知/权限…），
+ *      重点抓"接口带默认实现、Android 覆盖了、iOS 没覆盖"的静默降级
  *
  * 用法（仓库根执行）：
  *   node scripts/ios-capability-matrix.mjs            # 打印 Markdown 矩阵
  *   node scripts/ios-capability-matrix.mjs --check    # 只判定回归, 有意外缺口则退出码 1
  *   node scripts/ios-capability-matrix.mjs --out FILE # 写入文件
  *
- * 判定口径：
- *   - 全集 = commonMain PlatformCapabilities 的接口成员
- *   - "Android 已实现" = AndroidPlatformCapabilities 有 override
- *   - "iOS 已实现" = Ios + Native(iosAndOhos) + Shared 三段链路任一处有 override
- *   - 缺口 = Android 有 override 且 iOS 三段都没有 → 默认视为回归
- *   - 白名单 = 已判定为平台固有限制的项, 不算回归（新增白名单必须写理由）
- *
+ * 判定口径见各 KNOWN_* 白名单注释与 Docs/optimization/ios-android-capability-matrix.md。
  * 无第三方依赖, 只用 node 内置模块。
  */
 import fs from 'node:fs';
@@ -28,20 +27,25 @@ const ROOT = process.argv.includes('--root')
   : process.cwd();
 
 const PATHS = {
-  common: 'ui/src/commonMain/kotlin/io/legado/app/ui/root/PlatformCapabilities.kt',
-  android: 'app/src/main/java/io/legado/app/ui/main/AndroidPlatformCapabilities.kt',
-  ios: [
+  capabilitiesCommon: 'ui/src/commonMain/kotlin/io/legado/app/ui/root/PlatformCapabilities.kt',
+  capabilitiesAndroid: 'app/src/main/java/io/legado/app/ui/main/AndroidPlatformCapabilities.kt',
+  capabilitiesIos: [
     'ui/src/iosMain/kotlin/io/legado/app/ui/IosPlatformCapabilities.kt',
     'ui/src/iosAndOhosUiMain/kotlin/io/legado/app/ui/NativePlatformCapabilities.kt',
     'ui/src/sharedUiMain/kotlin/io/legado/app/ui/root/SharedPlatformCapabilities.kt',
   ],
+  servicesCommon: 'ui/src/commonMain/kotlin/io/legado/app/ui/root/PlatformServices.kt',
+  servicesAndroid: 'app/src/main/java/io/legado/app/ui/main/AndroidPlatformServices.kt',
+  servicesIos: [
+    'ui/src/iosMain/kotlin/io/legado/app/ui/IosPlatformServices.kt',
+  ],
 };
 
 /**
- * 已判定为"平台固有限制、不应对齐"的缺口。
- * 新增条目必须同时给出理由，并在 Docs/optimization/ios-android-capability-matrix.md 留档。
+ * PlatformCapabilities：已判定为"平台固有限制、不应对齐"的缺口。
+ * 新增条目必须同时给出理由，并在能力矩阵文档留档。
  */
-const KNOWN_PLATFORM_LIMITS = {
+const KNOWN_CAPABILITY_LIMITS = {
   // ---- fun 型能力 ----
   applyAppLanguage:
     'iOS 无进程内 locale 重载, AppleLanguages 方案需经系统语言设置, 自实现要改造 Compose Resources 字符串解析',
@@ -74,19 +78,36 @@ const KNOWN_PLATFORM_LIMITS = {
     'iOS 无 Monet 取色框架',
 };
 
+/**
+ * PlatformServices：接口带默认实现、Android 覆盖而 iOS 未覆盖的成员。
+ * 这类成员不会编译报错，只会静默走默认值 —— 是最隐蔽的完整性退化面。
+ */
+const KNOWN_SERVICE_DEFAULTS = {
+  writeImageToDir:
+    '默认返回 false 是接口设计的一部分: 仅当 supportsDirWrite=true 的端才走该路径, iOS 的 supportsDirWrite 为默认 false, 该分支不可达',
+  checkWrite:
+    '默认视为可写: iOS 沙盒内写入无需预检, 备份前恒 true; 真正的写失败由写入侧如实返回',
+  processWelcomeImage:
+    '待办(S 级): 启动闪屏背景图在 iOS 未做"原图入库 + 按屏幕尺寸烘焙", 现走调用方回落原路径, 功能可用但不进备份且启动解码原图; 属性能与备份完整性问题, 非功能缺失',
+  importBackgroundImage:
+    '接口自带共享默认实现(用 ScreenInfoProviders + bakeCoverImageFile), iOS 不覆盖即可正常工作, 不需要平台实现',
+  reapplyPageSystemBarAppearance:
+    '默认空实现是给"无需重应用"的端用的: iOS 的状态栏外观经 NSNotificationCenter 桥到 SwiftUI 根视图即时生效(见 IosWindowController.setSystemBars), 不存在 Android 那种需要重应用窗口标志的时机; 调用点 BaseComposeActivity 也是 Android 专用类',
+};
+
 function readOrDie(rel) {
   const abs = path.join(ROOT, rel);
   if (!fs.existsSync(abs)) {
-    console.error(`[ios-matrix] 缺少文件: ${rel}`);
-    console.error(`[ios-matrix] 请在仓库根执行, 或用 --root 指定根目录`);
+    console.error(`[ios-parity] 缺少文件: ${rel}`);
+    console.error('[ios-parity] 请在仓库根执行, 或用 --root 指定根目录');
     process.exit(2);
   }
   return fs.readFileSync(abs, 'utf8');
 }
 
-/** 收集 override 的成员名 */
+/** 收集 override 的成员名 -> 首次出现的文件 */
 function collectOverrides(files) {
-  const set = new Map(); // name -> 首个出现文件
+  const set = new Map();
   for (const rel of files) {
     const txt = readOrDie(rel);
     const re = /override\s+(?:suspend\s+)?(?:val|var|fun)\s+([A-Za-z0-9_]+)/g;
@@ -98,9 +119,9 @@ function collectOverrides(files) {
   return set;
 }
 
-/** 收集 commonMain 接口成员与默认 unsupported 成员 */
-function collectCommon() {
-  const txt = readOrDie(PATHS.common);
+/** PlatformCapabilities 的接口成员与平台差异项 */
+function collectCapabilities() {
+  const txt = readOrDie(PATHS.capabilitiesCommon);
   const members = new Set();
   const defaultUnsupported = new Set();
   const booleanFlags = new Set();
@@ -109,72 +130,140 @@ function collectCommon() {
     if (m) members.add(m[1]);
     const u = line.match(/^ {4}(?:open |suspend )*fun ([A-Za-z0-9_]+)\([^)]*\)\s*=\s*unsupported\(/);
     if (u) defaultUnsupported.add(u[1]);
-    // 布尔能力开关: 平台差异集中在这里, 必须与 fun 型能力同等对待。
-    // 只收默认 false 的项 —— 默认 true 表示"各端都有该能力", Android 的 override 往往是
-    // 按系统版本降级(如 drawBlur 在 API31 以下无效), iOS 用默认 true 不是缺口。
+    // 布尔能力开关: 只收默认 false 的项 —— 默认 true 表示"各端都有该能力",
+    // Android 的 override 往往是按系统版本降级(如 drawBlur 在 API31 以下无效),
+    // iOS 用默认 true 不是缺口。
     const f = line.match(/^ {4}(?:open )?val ([A-Za-z0-9_]+): Boolean get\(\) = (true|false)/);
     if (f && f[2] === 'false') booleanFlags.add(f[1]);
   }
   return { members, defaultUnsupported, booleanFlags };
 }
 
-const { members, defaultUnsupported, booleanFlags } = collectCommon();
-const androidSet = collectOverrides([PATHS.android]);
-const iosSet = collectOverrides(PATHS.ios);
+/**
+ * PlatformServices 里"带默认实现"的接口成员。
+ *
+ * 只认接口体内的成员: 用简单的花括号深度跟踪, 顶格的 `interface X {` 进入, 顶格 `}` 退出,
+ * 顺带跳过 `object PlatformServiceProviders` 这类实现块 —— 它们的方法不是接口契约。
+ */
+function collectServiceDefaults() {
+  const txt = readOrDie(PATHS.servicesCommon);
+  const lines = txt.split('\n');
+  const defaults = new Map(); // name -> interface 名
+  let depth = 0;
+  let inInterface = false;
+  let currentInterface = '';
+  for (const line of lines) {
+    const iface = line.match(/^interface ([A-Za-z0-9_]+)/);
+    if (iface) {
+      inInterface = true;
+      currentInterface = iface[1];
+      depth = 0;
+    }
+    if (inInterface) {
+      depth += (line.match(/\{/g) || []).length;
+      depth -= (line.match(/\}/g) || []).length;
+      // 接口体内的成员行: 4 空格缩进的 fun
+      const mem = line.match(/^ {4}(?:suspend )?fun ([A-Za-z0-9_]+)\s*\(/);
+      if (mem) {
+        // 带默认实现 = 行内有 " = " 或该行以 "{" / "{}" 结尾(块体/空块体)
+        const hasBody = /\)\s*(?::\s*[^=]+)?=\s*\S/.test(line) || /\{\s*\}?\s*$/.test(line);
+        if (hasBody) defaults.set(mem[1], currentInterface);
+      }
+      if (depth <= 0 && /^\}/.test(line)) {
+        inInterface = false;
+        currentInterface = '';
+      }
+    }
+  }
+  return defaults;
+}
 
-// 缺口 = 平台差异项中, Android 覆盖了而 iOS 三段链路都没有的
-const gapKeys = new Set([...defaultUnsupported, ...booleanFlags]);
-const gaps = [...gapKeys]
-  .filter(k => androidSet.has(k) && !iosSet.has(k))
+const { members, defaultUnsupported, booleanFlags } = collectCapabilities();
+const capAndroid = collectOverrides([PATHS.capabilitiesAndroid]);
+const capIos = collectOverrides(PATHS.capabilitiesIos);
+
+const capGapKeys = new Set([...defaultUnsupported, ...booleanFlags]);
+const capGaps = [...capGapKeys]
+  .filter(k => capAndroid.has(k) && !capIos.has(k))
   .sort();
 
-const unexpected = gaps.filter(k => !(k in KNOWN_PLATFORM_LIMITS));
-const known = gaps.filter(k => k in KNOWN_PLATFORM_LIMITS);
+const serviceDefaults = collectServiceDefaults();
+const svcAndroid = collectOverrides([PATHS.servicesAndroid]);
+const svcIos = collectOverrides(PATHS.servicesIos);
 
-const coverage = androidSet.size === 0
+// 服务缺口 = 接口带默认实现 && Android 覆盖 && iOS 未覆盖
+const svcGaps = [...serviceDefaults.keys()]
+  .filter(k => svcAndroid.has(k) && !svcIos.has(k))
+  .sort();
+
+const unexpectedCap = capGaps.filter(k => !(k in KNOWN_CAPABILITY_LIMITS));
+const knownCap = capGaps.filter(k => k in KNOWN_CAPABILITY_LIMITS);
+const unexpectedSvc = svcGaps.filter(k => !(k in KNOWN_SERVICE_DEFAULTS));
+const knownSvc = svcGaps.filter(k => k in KNOWN_SERVICE_DEFAULTS);
+
+const coverage = capAndroid.size === 0
   ? 0
-  : (iosSet.size / androidSet.size) * 100;
+  : (capIos.size / capAndroid.size) * 100;
 
 const lines = [];
 const P = s => lines.push(s);
 
-P('# iOS ↔ Android 平台能力矩阵（自动生成）');
+P('# iOS ↔ Android 平台完整性矩阵（自动生成）');
 P('');
 P(`> 由 \`scripts/ios-capability-matrix.mjs\` 生成于 ${new Date().toISOString()}。`);
 P('> 证据等级 **S（静态检查）**：只比对源码符号，不执行构建，不代表运行期行为。');
 P('');
-P('## 总量');
+
+P('## 一、PlatformCapabilities（能力开关与入口）');
 P('');
 P('| 指标 | 数值 |');
 P('| --- | --- |');
-P(`| \`PlatformCapabilities\` 接口成员 | ${members.size} |`);
-P(`| 默认 \`unsupported(...)\` 成员 | ${defaultUnsupported.size} |`);
-P(`| Android override 数 | ${androidSet.size} |`);
-P(`| iOS override 数（三段链路） | ${iosSet.size} |`);
+P(`| 接口成员 | ${members.size} |`);
+P(`| 默认 \`unsupported(...)\` 的 fun | ${defaultUnsupported.size} |`);
+P(`| 默认 \`false\` 的布尔开关 | ${booleanFlags.size} |`);
+P(`| Android override | ${capAndroid.size} |`);
+P(`| iOS override（三段链路） | ${capIos.size} |`);
 P(`| iOS/Android 覆盖率 | ${coverage.toFixed(1)}% |`);
-P(`| 真实缺口（Android 有 / iOS 无） | ${gaps.length} |`);
+P(`| 真实缺口 | ${capGaps.length} |`);
 P('');
-
-P('## 真实缺口');
-P('');
-if (gaps.length === 0) {
-  P('无。');
+if (capGaps.length === 0) {
+  P('无缺口。');
 } else {
   P('| 能力 | 判定 |');
   P('| --- | --- |');
-  for (const k of gaps) {
-    const reason = KNOWN_PLATFORM_LIMITS[k];
+  for (const k of capGaps) {
+    const reason = KNOWN_CAPABILITY_LIMITS[k];
     P(`| \`${k}\` | ${reason ? '平台固有限制：' + reason : '**未登记缺口（疑似回归）**'} |`);
   }
 }
 P('');
 
-if (unexpected.length > 0) {
+P('## 二、PlatformServices（平台服务默认实现覆盖）');
+P('');
+P(`| 指标 | 数值 |`);
+P(`| --- | --- |`);
+P(`| 接口中带默认实现的成员 | ${serviceDefaults.size} |`);
+P(`| Android override | ${svcAndroid.size} |`);
+P(`| iOS override | ${svcIos.size} |`);
+P(`| 静默降级缺口 | ${svcGaps.length} |`);
+P('');
+if (svcGaps.length === 0) {
+  P('无缺口。');
+} else {
+  P('| 成员 | 所属接口 | 判定 |');
+  P('| --- | --- | --- |');
+  for (const k of svcGaps) {
+    const reason = KNOWN_SERVICE_DEFAULTS[k];
+    P(`| \`${k}\` | \`${serviceDefaults.get(k)}\` | ${reason ? '已登记：' + reason : '**未登记缺口（疑似回归）**'} |`);
+  }
+}
+P('');
+
+if (unexpectedCap.length > 0 || unexpectedSvc.length > 0) {
   P('## ⚠️ 未登记的缺口');
   P('');
-  P('以下能力 Android 已实现、iOS 尚未实现，且未在 `KNOWN_PLATFORM_LIMITS` 登记理由：');
-  P('');
-  for (const k of unexpected) P(`- \`${k}\``);
+  for (const k of unexpectedCap) P(`- PlatformCapabilities: \`${k}\``);
+  for (const k of unexpectedSvc) P(`- PlatformServices: \`${k}\`（默认实现未覆盖）`);
   P('');
 }
 
@@ -185,20 +274,22 @@ const outIdx = process.argv.indexOf('--out');
 
 if (outIdx !== -1) {
   const outPath = process.argv[outIdx + 1];
-  if (!outPath) { console.error('[ios-matrix] --out 需要一个文件路径'); process.exit(2); }
+  if (!outPath) { console.error('[ios-parity] --out 需要一个文件路径'); process.exit(2); }
   fs.writeFileSync(outPath, markdown);
-  console.error(`[ios-matrix] 已写入 ${outPath}`);
+  console.error(`[ios-parity] 已写入 ${outPath}`);
 } else if (!checkMode) {
   process.stdout.write(markdown);
 }
 
 if (checkMode) {
-  console.error(`[ios-matrix] Android override=${androidSet.size} iOS override=${iosSet.size} 覆盖 ${coverage.toFixed(1)}%`);
-  if (unexpected.length > 0) {
-    console.error(`[ios-matrix] FAIL: 发现 ${unexpected.length} 项未登记缺口: ${unexpected.join(', ')}`);
-    console.error('[ios-matrix] 若确属平台固有限制, 请写入 KNOWN_PLATFORM_LIMITS 并在能力矩阵文档留档。');
+  console.error(`[ios-parity] Capabilities: Android=${capAndroid.size} iOS=${capIos.size} 覆盖 ${coverage.toFixed(1)}%, 缺口 ${knownCap.length}`);
+  console.error(`[ios-parity] Services: 默认实现成员 ${serviceDefaults.size}, 缺口 ${knownSvc.length}`);
+  const bad = [...unexpectedCap, ...unexpectedSvc];
+  if (bad.length > 0) {
+    console.error(`[ios-parity] FAIL: 发现 ${bad.length} 项未登记缺口: ${bad.join(', ')}`);
+    console.error('[ios-parity] 若确属平台固有限制, 请写入对应白名单并在能力矩阵文档留档。');
     process.exit(1);
   }
-  console.error(`[ios-matrix] OK: 缺口 ${known.length} 项均为已登记平台限制。`);
+  console.error('[ios-parity] OK: 全部缺口均为已登记项。');
   process.exit(0);
 }

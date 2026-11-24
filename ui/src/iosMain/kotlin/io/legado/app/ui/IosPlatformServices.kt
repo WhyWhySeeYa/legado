@@ -57,9 +57,11 @@ import platform.AVFoundation.pause
 import platform.AVFoundation.play
 import platform.AVFoundation.replaceCurrentItemWithPlayerItem
 import platform.AVFoundation.requestAccessForMediaType
+import platform.Foundation.NSFileManager
 import platform.Foundation.NSNotificationCenter
 import platform.Foundation.NSNotificationName
 import platform.Foundation.NSSelectorFromString
+import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSURL
 import platform.Photos.PHAccessLevelAddOnly
 import platform.Photos.PHAuthorizationStatusAuthorized
@@ -176,6 +178,25 @@ private object IosFilePickerService : FilePickerService {
             Toasters.get().toast("无法保存目录的访问授权，请重新选择目录")
             null
         }
+    }
+
+    /**
+     * 丢弃文档面板 Import 模式交付到本应用临时目录的副本。
+     *
+     * [pickDocuments] 用 `UIDocumentPickerModeImport`: 系统把选中文件**复制**进沙盒临时目录后
+     * 回传路径, 用户原文件不动。调用方把内容复制进持久目录后应调本方法, 否则每选一次就在临时
+     * 目录留一份原图/原书 (调用点见 `IosPlatformCapabilities.importPickedBookFiles` 的
+     * `onRelease` 与 `CoverStorageServiceProviders`)。
+     *
+     * 只删本应用临时目录内的路径: 沙盒外的用户原文件不在本进程可见范围; 含 `..` 的路径直接
+     * 放弃, 不做任何越界删除。
+     */
+    override fun discardPickedFile(path: String) {
+        if (path.isEmpty()) return
+        val root = NSTemporaryDirectory().trimEnd('/')
+        if (root.isEmpty()) return
+        if (!path.startsWith("$root/") || path.contains("..")) return
+        runCatching { NSFileManager.defaultManager.removeItemAtPath(path, null) }
     }
 }
 
