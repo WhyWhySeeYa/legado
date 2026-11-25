@@ -13,6 +13,7 @@ import io.legado.app.utils.File
 import io.legado.app.utils.IosSecurityScopeLease
 import io.legado.app.utils.IosSecurityScopedStorage
 import io.legado.app.utils.InputStream
+import io.legado.app.utils.toInputStream
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.cinterop.readBytes
@@ -20,7 +21,6 @@ import kotlinx.cinterop.useContents
 import platform.CoreGraphics.CGRectMake
 import platform.CoreGraphics.CGSizeMake
 import platform.Foundation.NSURL
-import platform.Foundation.fileURLWithPath
 import platform.PDFKit.PDFDocument
 import platform.PDFKit.kPDFDisplayBoxCropBox
 import platform.UIKit.UIColor
@@ -152,7 +152,15 @@ class IosPdfRenderPort(initialScreenWidthPx: Int) : PdfRenderPort {
         val storage = BookImageStorageProviders.get()
         val cacheKey = "pdf_${index}_${screenWidthPx}.jpg"
         val path = storage.getImagePath(book, BookChapter(url = index.toString(), bookUrl = book.bookUrl), cacheKey)
-        return path?.let { File(it).takeIf { f -> f.isFile }?.inputStream() }
+        // File.inputStream() 是 JVM-only 扩展, native 侧不存在 (编译报
+        // "Unresolved reference 'inputStream'")。改为 native 侧已有的
+        // File.readBytes() + ByteArray.toInputStream(); 读失败照原语义上抛,
+        // 只有"文件不存在"返回 null。
+        return path?.let { p ->
+            val f = File(p)
+            if (!f.isFile) return@let null
+            f.readBytes().toInputStream()
+        }
     }
 
     override fun writeCachedPage(book: Book, index: Int, bytes: ByteArray) {
