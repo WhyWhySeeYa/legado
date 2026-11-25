@@ -520,7 +520,12 @@ final class ShareViewController: UIViewController {
         UTType.json.identifier,
         UTType.pdf.identifier,
         UTType.zip.identifier,
-        UTType.tar.identifier,
+        // 用字符串而非 UTType.tar: Xcode 26.6 / iOS SDK 26.5 下 UniformTypeIdentifiers
+        // 没有 tar 静态成员 (编译报 "type 'UTType' has no member 'tar'"), 但
+        // public.tar-archive 这个 UTI 本身仍然有效, 且必须与 project.yml / Info.plist 的
+        // NSExtensionActivationRule 谓词里那一份逐字一致 —— 故直接写字面量, 与本行下方的
+        // "org.gnu.gnu-zip-tar-archive" 同款。
+        "public.tar-archive",
         UTType.gzip.identifier,
         "org.gnu.gnu-zip-tar-archive",
         UTType.mpeg4Movie.identifier,
