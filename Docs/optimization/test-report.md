@@ -2,7 +2,22 @@
 
 > 本文件只记录**实际执行过**的测试。未执行的一律不写"通过"。
 
-## 1. 执行环境
+## 0. 真机验证（D 级）— 唯一一项达到 D 的证据
+
+| 项 | 值 |
+| --- | --- |
+| 产物 | `legado-3.26.11260612-ios-unsigned.ipa`（35.30 MB） |
+| 构建 commit | `7f1a3f9064986f1cd4878dfbbaf8b957fe7502ba` |
+| 构建来源 | GitHub Actions run #4（`ios.yml`，stage=ipa），Xcode 26.6 / iOS SDK 26.5 |
+| 分发 | Release `multiplatform-test`，`prerelease: true` |
+| SHA-256 | `a34f7e05c346fa3fe018b0f31dd9c348574f51b3a028856b4bc301eede58a14b` |
+| 安装结果 | **用户真机安装成功，初步使用无问题** |
+| 证据等级 | **D（真机）** |
+| 待补 | 具体系统版本、逐项 AT 用例走查结果（用户尚未提供，本文不代填） |
+
+**注意**：这一项证明的是"该 IPA 能在用户设备上安装并初步运行"。它**不等于** PRD 的 AT01–AT20 全部通过，也不等于 iOS 15 兼容已验证——PRD 要求的首验设备是 iPhone 14 Pro Max / iOS 16.6，iOS 15 真机仍未测。
+
+## 1. 执行环境（静态审计阶段）
 
 | 项 | 值 |
 | --- | --- |
@@ -65,24 +80,53 @@ OK: 全部缺口均为已登记项。
 
 **这不是编译验证**：未运行 `kotlinc`，未链接 klib。
 
-## 3. 未执行（不得声称通过）
+## 3. 已执行：CI 构建与产物校验（B 级）
+
+run #4（`ios.yml`，stage=ipa，commit `7f1a3f90`）在 GitHub Actions 的 macOS runner 上实际跑完：
+
+| 步骤 | 结果 |
+| --- | --- |
+| Compile shared iOS klib | success |
+| Link shared framework | success |
+| Archive (unsigned) | success |
+| Package unsigned IPA | success |
+| Verify IPA structure | success（7 项全过，见 3.1） |
+| Upload IPA artifact | success |
+
+总耗时 40.1 分钟，产物 `ios-ipa-unsigned` 34.60 MB。
+
+### 3.1 产物结构校验输出（CI 实测原文）
+
+```
+OK - MinimumOSVersion 存在 (14.0)
+OK - MinimumOSVersion <= 15 (14.0)
+OK - 主二进制存在 (legado)
+OK - 主二进制含 arm64
+OK - 内嵌 shared.framework
+OK - IPA 文件名版本与 Info.plist 一致 (legado-3.26.11260612-ios-unsigned.ipa)
+OK - ShareExtension 已嵌入
+```
+
+**这条证据回答了两件事**：iOS 目标链路能编能链能出包（B）；产物最低系统声明是 14.0，不高于 iOS 15（B）。仍不回答"iOS 15 真机能否运行"。
+
+## 4. 未执行（不得声称通过）
 
 | 项 | 原因 | 需要的环境 |
 | --- | --- | --- |
-| Kotlin 编译（`stage=klib`） | 无 JDK/Gradle | macOS + Xcode |
-| framework 链接（`stage=link`） | 同上 | 同上 |
-| IPA 产出（`stage=ipa`） | 同上 | 同上 |
-| 产物 `MinimumOSVersion` 实测 | 无产物 | macOS |
 | 模拟器安装启动（`stage=simulator`） | 无模拟器 | macOS |
-| 真机安装与核心链路（AT01/AT02/AT03） | 无 iOS 设备 | iOS15 真机 |
-| 备份/恢复跨端往返 | 无设备 | 双端设备 |
-| 书源兼容实测 | 无本地 fixture 与设备 | macOS + 真机 |
+| 核心链路逐项走查（AT01/AT02/AT03 等） | 用户仅报告"安装测试无问题"，未逐项走查 | 真机 |
+| iOS 15 真机 | 无 iOS 15 设备 | iOS 15 真机 |
+| 备份/恢复跨端往返 | 未测 | 双端设备 |
+| 书源兼容实测 | 未建本地 fixture | macOS + 真机 |
+| 依赖 `LC_BUILD_VERSION` 逐项核实 | 未做 | macOS |
 
-## 4. 证据等级汇总
+## 5. 证据等级汇总
 
 | 类别 | 等级 |
 | --- | --- |
 | 守卫脚本自测（2.1） | **P**（实际执行） |
 | 守卫回归判定（2.2） | **P**（实际执行） |
+| CI 构建与产物校验（3） | **B**（实际构建） |
+| 真机安装与初步使用（0） | **D**（真机） |
 | 所有代码审计结论 | **S**（静态检查） |
-| 构建 / 模拟器 / 真机 | **U**（未验证） |
+| 核心链路逐项验收 / iOS 15 真机 | **U**（未验证） |
